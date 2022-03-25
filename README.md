@@ -1,4 +1,4 @@
-# DevOps Guru MySQL
+# Amazon DevOps Guru for RDS 
 
 This repository contains CloudFromation template, some scripts and guidance how to use these resources on your own for creating and exploring DevOps Guru insights.
 
