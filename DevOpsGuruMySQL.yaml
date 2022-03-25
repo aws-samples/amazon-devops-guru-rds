@@ -1,0 +1,493 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: "Creates resources necessary to demonstrate DevOps Guru insights"
+Parameters:
+  VPCCIDR:
+    Type: String
+    Description: VPC CIDR
+    Default: "10.1.0.0/26"
+  PrivateSubnetOneCIDR:
+    Type: String
+    Description: Subnet One CIDR
+    Default: "10.1.0.0/28"
+  PrivateSubnetTwoCIDR:
+    Type: String
+    Description: Subnet One CIDR
+    Default: "10.1.0.16/28"
+  PublicSubnetOneCIDR:
+    Type: String
+    Description: Public Subnet One CIDR
+    Default: "10.1.0.32/28"
+  DBInstanceClass:
+    Description: RDS Instance Class
+    Type: String
+    Default: db.t4g.medium
+    AllowedValues:
+      - db.t4g.medium
+      - db.r5.large
+      - db.r5.xlarge
+      - db.r5.2xlarge
+      - db.r5.4xlarge
+      - db.r5.8xlarge
+  InstanceType:
+    Description: EC2 instance type
+    Type: String
+    Default: t2.medium
+    AllowedValues:
+      - t2.medium
+      - t2.large
+      - r5.large
+      - r5.xlarge
+      - r5.2xlarge
+      - r5.4xlarge
+    ConstraintDescription: must be a valid EC2 instance type.
+  AutoHibernateTimeout:
+    Description: How many minutes idle before shutting down the IDE. Options, 1day, 1week, Never (0)
+    Type: Number
+    Default: 1440
+    AllowedValues:
+      - 1440
+      - 10080
+      - 0
+  Tests:
+    Description: Run one test or all tests
+    Default: one
+    Type: String
+    AllowedValues:
+      - one
+      - all
+    ConstraintDescription: must specify one or all
+  EnableDevOpsGuru:
+    Description: Choose y if you don't have DevOps Guru currently turned on
+    Default: y
+    Type: String
+    AllowedValues:
+      - y
+      - n
+    ConstraintDescription: Must specify y or n
+
+Conditions:
+  CreateAllResources: !Equals
+    - !Ref Tests
+    - all
+  DevOpsGuruEnable: !Equals 
+    - !Ref EnableDevOpsGuru
+    - y
+
+Resources:
+  Cloud9IDE:
+    Type: AWS::Cloud9::EnvironmentEC2
+    Properties:
+      Description: "Cloud9 IDE to interact with the Aurora MySQL"
+      InstanceType: !Ref InstanceType
+      ImageId: amazonlinux-2-x86_64
+      AutomaticStopTimeMinutes: !Ref "AutoHibernateTimeout"
+      Name: DevOpsGuruMySQLInstance
+      SubnetId: !Ref PublicSubnetOne
+
+  VPCFlowLogsRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ""
+            Effect: "Allow"
+            Principal:
+              Service: "vpc-flow-logs.amazonaws.com"
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: "vpc-flow-logs-rds"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                  - "logs:DescribeLogGroups"
+                  - "logs:DescribeLogStreams"
+                Resource: !GetAtt VPCFlowLogsGroupRDS.Arn
+
+  FlowLogsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: An symmetric CMK for encrypting flow logs
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Id: keyForFlowLogs
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: kms:*
+            Resource: "*"
+          - Sid: Allow log encryption
+            Effect: Allow
+            Principal:
+              Service: !Sub logs.${AWS::Region}.amazonaws.com
+            Action:
+              - kms:Encrypt*
+              - kms:Decrypt*
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:Describe*
+            Resource: "*"
+            Condition:
+              ArnEquals:
+                kms:EncryptionContext:aws:logs:arn: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:VPCFlowLogsRDSMySQL
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      CidrBlock: !Ref VPCCIDR
+      Tags:
+        - Key: Name
+          Value: "DevOpsGuru-MySQL-VPC"
+  VPCFlowLogsGroupRDS:
+    Type: "AWS::Logs::LogGroup"
+    Properties:
+      LogGroupName: "VPCFlowLogsRDSMySQL"
+      KmsKeyId: !GetAtt FlowLogsKey.Arn
+      RetentionInDays: 7
+
+  VPCFlowLog:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      LogGroupName: "VPCFlowLogsRDSMySQL"
+      ResourceId: !Ref VPC
+      ResourceType: VPC
+      TrafficType: ALL
+      DeliverLogsPermissionArn: !GetAtt VPCFlowLogsRole.Arn
+
+  PublicSubnetOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref "VPC"
+      CidrBlock: !Ref PublicSubnetOneCIDR
+      AvailabilityZone: !Select
+        - 1
+        - Fn::GetAZs: !Ref "AWS::Region"
+      Tags:
+        - Key: Name
+          Value: "Public Subnet One"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Join:
+              - "-"
+              - - Ref: AWS::StackName
+                - InternetGateway
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref "VPC"
+      InternetGatewayId: !Ref InternetGateway
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref "VPC"
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Join:
+              - "-"
+              - - Ref: AWS::StackName
+                - PublicRouteTable
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetOne
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateSubnetOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 0
+        - Fn::GetAZs: !Ref "AWS::Region"
+      VpcId: !Ref "VPC"
+      CidrBlock: !Ref PrivateSubnetOneCIDR
+      Tags:
+        - Key: Name
+          Value: "Private Subnet One"
+
+  PrivateSubnetTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select
+        - 1
+        - Fn::GetAZs: !Ref "AWS::Region"
+      VpcId: !Ref "VPC"
+      CidrBlock: !Ref PrivateSubnetTwoCIDR
+      Tags:
+        - Key: Name
+          Value: "Private Subnet Two"
+
+  PrivateRouteTable:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: "RDS Route Table"
+
+  PrivateSubnetOneRouteTableAssociation:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      SubnetId: !Ref PrivateSubnetOne
+      RouteTableId: !Ref PrivateRouteTable
+  PrivateSubnetTwoRouteTableAssociation:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      SubnetId: !Ref PrivateSubnetTwo
+      RouteTableId: !Ref PrivateRouteTable
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Private SG For internal communication
+      VpcId: !Ref "VPC"
+
+  RDSSecurityGroupIngress1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow EC2 Instance to connect
+      GroupId: !Ref RDSSecurityGroup
+      IpProtocol: "tcp"
+      FromPort: 3306
+      ToPort: 3306
+      CidrIp: !Ref VPCCIDR
+
+  RDSSecurityGroupEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      Description: To communicate within the SG
+      GroupId: !Ref RDSSecurityGroup
+      IpProtocol: "tcp"
+      FromPort: 0
+      ToPort: 0
+      DestinationSecurityGroupId: !GetAtt RDSSecurityGroup.GroupId
+
+  DevOpsGuruSecretsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: An symmetric CMK for Secrets Manager
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Id: keyForSecrets
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: kms:*
+            Resource: "*"
+
+  DevOpsGuruSecretTest1:
+    Type: "AWS::SecretsManager::Secret"
+    Properties:
+      Name: /devopsgurudemo/dbsecret-test1
+      Description: Generates random value for db password and stores in secrets manager
+      KmsKeyId: !Ref DevOpsGuruSecretsKey
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "admin", "port": "3306", "host": " "}'
+        GenerateStringKey: "password"
+        PasswordLength: 20
+        ExcludeCharacters: "\"@/\\;.:+'"
+
+  DevOpsGuruSecretTest2:
+    Type: "AWS::SecretsManager::Secret"
+    Condition: CreateAllResources
+    Properties:
+      Name: /devopsgurudemo/dbsecret-test2
+      Description: Generates random value for db password and stores in secrets manager
+      KmsKeyId: !Ref DevOpsGuruSecretsKey
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "admin", "port": "3306", "host": " "}'
+        GenerateStringKey: "password"
+        PasswordLength: 20
+        ExcludeCharacters: "\"@/\\;.:+'"
+
+  DevOpsGuruSecretTest3:
+    Type: "AWS::SecretsManager::Secret"
+    Condition: CreateAllResources
+    Properties:
+      Name: /devopsgurudemo/dbsecret-test3
+      Description: Generates random value for db password and stores in secrets manager
+      KmsKeyId: !Ref DevOpsGuruSecretsKey
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "admin", "port": "3306", "host": " "}'
+        GenerateStringKey: "password"
+        PasswordLength: 20
+        ExcludeCharacters: "\"@/\\;.:+'"
+
+  RDSClusterTest1:
+    Type: "AWS::RDS::DBCluster"
+    Properties:
+      DBClusterIdentifier: devopsgurudemo-aurora-cluster-aws-test-1
+      DBClusterParameterGroupName: !Ref RDSDBClusterParameterGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: aurora-mysql
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DevOpsGuruSecretTest1}::password}}"
+      MasterUsername: admin
+      DatabaseName: "devopsgurusource"
+      StorageEncrypted: true
+      VpcSecurityGroupIds: [!Ref RDSSecurityGroup]
+      Tags:
+        - Key: Name
+          Value: devopsgurudemo-cluster-aws-test-1
+
+  RDSClusterTest2:
+    Type: "AWS::RDS::DBCluster"
+    Condition: CreateAllResources
+    Properties:
+      DBClusterIdentifier: devopsgurudemo-aurora-cluster-aws-test-2
+      DBClusterParameterGroupName: !Ref RDSDBClusterParameterGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: aurora-mysql
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DevOpsGuruSecretTest2}::password}}"
+      MasterUsername: admin
+      DatabaseName: "devopsgurusource"
+      StorageEncrypted: true
+      VpcSecurityGroupIds: [!Ref RDSSecurityGroup]
+      Tags:
+        - Key: Name
+          Value: devopsgurudemo-cluster-aws-test-2
+
+  RDSClusterTest3:
+    Type: "AWS::RDS::DBCluster"
+    Condition: CreateAllResources
+    Properties:
+      DBClusterIdentifier: devopsgurudemo-aurora-cluster-aws-test-3
+      DBClusterParameterGroupName: !Ref RDSDBClusterParameterGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: aurora-mysql
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DevOpsGuruSecretTest3}::password}}"
+      MasterUsername: admin
+      DatabaseName: "devopsgurusource"
+      StorageEncrypted: true
+      VpcSecurityGroupIds: [!Ref RDSSecurityGroup]
+      Tags:
+        - Key: Name
+          Value: devopsgurudemo-cluster-aws-test-3
+
+  RDSDBClusterParameterGroup:
+    Type: "AWS::RDS::DBClusterParameterGroup"
+    Properties:
+      Description: "Aurora Cluster Parameter Group"
+      Family: aurora-mysql5.7
+      Parameters:
+        time_zone: US/Eastern
+        max_allowed_packet: "1073741824"
+        binlog_format: "ROW"
+        binlog_row_image: "full"
+        binlog_checksum: "NONE"
+
+  RDSDBInstanceTest1:
+    Type: "AWS::RDS::DBInstance"
+    Properties:
+      AvailabilityZone: !GetAtt PrivateSubnetOne.AvailabilityZone
+      DBClusterIdentifier: !Ref RDSClusterTest1
+      DBInstanceClass: !Ref DBInstanceClass
+      DBParameterGroupName: !Ref RDSDBParameterGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: aurora-mysql
+      PubliclyAccessible: false
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 731
+
+  RDSDBInstanceTest2:
+    Type: "AWS::RDS::DBInstance"
+    Condition: CreateAllResources
+    Properties:
+      AvailabilityZone: !GetAtt PrivateSubnetOne.AvailabilityZone
+      DBClusterIdentifier: !Ref RDSClusterTest2
+      DBInstanceClass: !Ref DBInstanceClass
+      DBParameterGroupName: !Ref RDSDBParameterGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: aurora-mysql
+      PubliclyAccessible: false
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 731
+
+  RDSDBInstanceTest3:
+    Type: "AWS::RDS::DBInstance"
+    Condition: CreateAllResources
+    Properties:
+      AvailabilityZone: !GetAtt PrivateSubnetOne.AvailabilityZone
+      DBClusterIdentifier: !Ref RDSClusterTest3
+      DBInstanceClass: !Ref DBInstanceClass
+      DBParameterGroupName: !Ref RDSDBParameterGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: aurora-mysql
+      PubliclyAccessible: false
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 731
+
+  RDSDBParameterGroup:
+    Type: "AWS::RDS::DBParameterGroup"
+    Properties:
+      Description: Aurora Parameter Group
+      Family: aurora-mysql5.7
+      Parameters:
+        sql_mode: IGNORE_SPACE
+        max_allowed_packet: "1073741824"
+        innodb_buffer_pool_size: "{DBInstanceClassMemory*3/4}"
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: String
+      DBSubnetGroupName: source-db-subnet-group-aws
+      SubnetIds: [!Ref PrivateSubnetOne, !Ref PrivateSubnetTwo]
+
+  SMRDSAttachmentTest1:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref DevOpsGuruSecretTest1
+      TargetId: !Ref RDSDBInstanceTest1
+      TargetType: AWS::RDS::DBInstance
+
+  SMRDSAttachmentTest2:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Condition: CreateAllResources
+    Properties:
+      SecretId: !Ref DevOpsGuruSecretTest2
+      TargetId: !Ref RDSDBInstanceTest2
+      TargetType: AWS::RDS::DBInstance
+
+  SMRDSAttachmentTest3:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Condition: CreateAllResources
+    Properties:
+      SecretId: !Ref DevOpsGuruSecretTest3
+      TargetId: !Ref RDSDBInstanceTest3
+      TargetType: AWS::RDS::DBInstance
+
+  DevOpsGuruResourceCollection:
+    Type: AWS::DevOpsGuru::ResourceCollection
+    Condition: DevOpsGuruEnable
+    Properties:
+      ResourceCollectionFilter:
+        CloudFormation:
+          StackNames:
+            - !Ref AWS::StackName
