@@ -1,3 +1,4 @@
+---
 AWSTemplateFormatVersion: 2010-09-09
 Description: "Creates resources necessary to demonstrate DevOps Guru insights"
 Parameters:

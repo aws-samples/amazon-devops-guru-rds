@@ -61,3 +61,5 @@ for i in range(num_workers):
 print(f"WAITING for {num_workers} threads to complete")
 [_.join() for _ in threads]
 print(f"END")
+
+print("The script is successfully completed.")

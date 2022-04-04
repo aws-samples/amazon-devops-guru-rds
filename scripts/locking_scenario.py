@@ -55,3 +55,5 @@ while True:
 
 print(f"END: {session}")
 [_.join() for _ in threads]
+
+print("The script is successfully completed.")

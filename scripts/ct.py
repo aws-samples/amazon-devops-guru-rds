@@ -34,3 +34,5 @@ cursor.execute("commit")
 
 cursor.close()
 conn.close()
+
+print("The script is successfully completed.")

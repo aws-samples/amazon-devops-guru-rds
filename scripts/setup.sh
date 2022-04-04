@@ -22,3 +22,5 @@ if [ "$1" == "all" ]; then
     echo "export TEST3HOST=\`aws secretsmanager get-secret-value  --secret-id \"/devopsgurudemo/dbsecret-test3\" --query 'SecretString' --output text | jq -r '.\"host\"'\`" >> ~/.bashrc
     echo "export TEST3DBPASSWORD=\`aws secretsmanager get-secret-value  --secret-id \"/devopsgurudemo/dbsecret-test3\" --query 'SecretString' --output text | jq -r '.\"password\"'\`" >> ~/.bashrc
 fi
+
+echo "The setup is successfully completed."
